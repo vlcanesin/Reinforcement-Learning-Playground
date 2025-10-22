@@ -41,7 +41,7 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.memory)
 
-class VanillaDQNAgent(BaseAgent):
+class DQNAgent(BaseAgent):
     def __init__(self, 
                  state_dim, 
                  action_dim, 
@@ -61,6 +61,12 @@ class VanillaDQNAgent(BaseAgent):
         self.batch_size = batch_size
 
         self.policy_net = DQN(state_dim, action_dim)
+        self.target_net = DQN(state_dim, action_dim)
+        # Copy weights to the target net
+        self.update_target_net()
+
+        # Ensures that the backward pass won't change the target net parameters
+        self.target_net.eval()
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
         self.memory = ReplayBuffer(buffer_size)
@@ -118,8 +124,9 @@ class VanillaDQNAgent(BaseAgent):
         ])
 
         # Compute the target Q-values for non-terminal next_states
+        # Important: the target_net is used
         next_state_values[non_final_mask] = (
-            self.policy_net(non_final_next_states).max(1)[0].detach()
+            self.target_net(non_final_next_states).max(1)[0].detach()
         )
 
         expected_state_action_values = (next_state_values * self.gamma) + reward_batch
@@ -133,6 +140,10 @@ class VanillaDQNAgent(BaseAgent):
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 
+    def update_target_net(self):
+        # copy weights from policy_net to target_net
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+
     def save(self, path):
         torch.save(self.policy_net.state_dict(), path)
 
@@ -140,8 +151,8 @@ class VanillaDQNAgent(BaseAgent):
         self.policy_net.load_state_dict(torch.load(path))
 
 # Training loop
-def train(env, state_dim, action_dim, num_episodes, max_steps_per_episode, target_score):
-    agent = VanillaDQNAgent(state_dim, action_dim)
+def train(env, state_dim, action_dim, num_episodes, max_steps_per_episode, target_score, n_iter_update_target=10):
+    agent = DQNAgent(state_dim, action_dim)
 
     scores_deque = deque(maxlen=100)
     scores = []
@@ -170,6 +181,9 @@ def train(env, state_dim, action_dim, num_episodes, max_steps_per_episode, targe
 
             if done:
                 break
+
+        if (episode+1) % n_iter_update_target == 0:
+            agent.update_target_net()
 
         scores_deque.append(episode_reward)
         scores.append(episode_reward)
