@@ -32,7 +32,6 @@ Transition = namedtuple(
     "Transition", ("state", "action", "reward", "next_state", "done")
 )
 
-
 # Basic replay buffer without prioritization using deque for storage
 class ReplayBuffer:
     def __init__(self, capacity):
@@ -49,7 +48,7 @@ class ReplayBuffer:
         return len(self.memory)
 
 
-class VanillaDQNAgent(BaseAgent):
+class DQNExpReplayAgent(BaseAgent):
     def __init__(
         self,
         state_dim,
@@ -158,8 +157,10 @@ class VanillaDQNAgent(BaseAgent):
 
 
 # Training loop
-def train(env, state_dim, action_dim, num_episodes, max_steps_per_episode, target_score):
-    agent = VanillaDQNAgent(state_dim, action_dim)
+def train(
+    env, state_dim, action_dim, num_episodes, max_steps_per_episode, target_score
+):
+    agent = DQNExpReplayAgent(state_dim, action_dim)
 
     scores_deque = deque(maxlen=100)
     scores = []

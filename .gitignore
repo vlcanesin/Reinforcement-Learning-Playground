@@ -12,3 +12,6 @@ utils/__pycache__/
 utils/*.pyc
 utils/*.pyo
 .DS_Store
+models/
+benchmark_results/
+best_config_*.txt
