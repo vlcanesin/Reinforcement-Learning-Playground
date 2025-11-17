@@ -200,6 +200,8 @@ class ReinforceAgent(BaseAgent):
         entropy = dist.entropy().mean()
 
         # Policy loss (REINFORCE with advantage)
+        # Working with the advantages reduces the variance when
+        # calculating the expected value for the loss
         policy_loss = -(log_probs_t * advantages_t).mean()
 
         # Value loss (MSE between value predictions and returns)
@@ -208,6 +210,10 @@ class ReinforceAgent(BaseAgent):
         value_loss = nn.functional.mse_loss(values_squeezed, returns_t)
 
         # Total loss with entropy regularization
+        # The entropy calculates how uncertain (i.e. evenly distributed)
+        # is the distribution of the action logits. We want add a small
+        # factor to the loss making the process maximize the entropy in
+        # order to increase the exploration
         loss = policy_loss + value_loss - self.entropy_coef * entropy
 
         # Optimize
