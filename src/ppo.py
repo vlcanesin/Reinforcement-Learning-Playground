@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 
 from src.base_agent import BaseAgent
 
@@ -17,15 +16,17 @@ class Actor(nn.Module):
         super(Actor, self).__init__()
         self.network = nn.Sequential(
             nn.Linear(state_dim, hidden_size),
+            # nn.Tanh(),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
+            # nn.Tanh(),
             nn.ReLU(),
             nn.Linear(hidden_size, action_dim)
         )
 
     def forward(self, state):
-        # Output log probabilities of actions
-        return F.log_softmax(self.network(state), dim=-1)
+        # Output logits of actions
+        return self.network(state)
 
 
 # --- 2. Define the Critic Network (Value Function) ---
@@ -35,8 +36,10 @@ class Critic(nn.Module):
         super(Critic, self).__init__()
         self.network = nn.Sequential(
             nn.Linear(state_dim, hidden_size),
+            # nn.Tanh(),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
+            # nn.Tanh(),
             nn.ReLU(),
             nn.Linear(hidden_size, 1)  # Output a single value (state-value)
         )
@@ -44,6 +47,27 @@ class Critic(nn.Module):
     def forward(self, state):
         return self.network(state)
 
+# The Actor decides which action to take given a state.
+# For a discrete action space, it outputs probabilities over actions.
+# The Critic estimates the value (expected return) of being in a given state.
+# They both share a feature encoder.
+class ActorCritic(nn.Module):
+    def __init__(self, state_dim, action_dim, hidden_size=128):
+        super(ActorCritic, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(state_dim, hidden_size),
+            # nn.Tanh(),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            # nn.Tanh(),
+            nn.ReLU()
+        )
+        self.actor = nn.Linear(hidden_size, action_dim)
+        self.critic = nn.Linear(hidden_size, 1)
+
+    def forward(self, state):
+        features = self.encoder(state)
+        return self.actor(features), self.critic(features)
 
 # --- 3. Define the PPO Agent ---
 # This class combines the Actor and Critic, handles training, and action selection.
@@ -63,6 +87,7 @@ class PPOAgent(BaseAgent):
         max_grad_norm=0.5,
         batch_size=5,
         minibatch_size=64,
+        device="cuda"
     ):
         """
         PPO agent with additional improvements.
@@ -81,14 +106,29 @@ class PPOAgent(BaseAgent):
             max_grad_norm: Maximum gradient norm for clipping
             batch_size: Number of episodes to collect before updating
             minibatch_size: Size of mini-batches for SGD updates
+            device: Device to run the training/inference
         """
         # Initialize actor and critic networks
-        self.actor = Actor(state_dim, action_dim)
-        self.critic = Critic(state_dim)
+        # self.actor = Actor(state_dim, action_dim).to(device)
+        # self.critic = Critic(state_dim).to(device)
+        self.actor_critic = ActorCritic(state_dim, action_dim).to(device)
 
         # Define optimizers for both networks
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr_actor)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr_critic)
+        # self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr_actor) 
+        # self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr_critic)
+        self.actor_optimizer = torch.optim.Adam(
+            list(self.actor_critic.encoder.parameters()) +
+            list(self.actor_critic.actor.parameters()),
+            lr=lr_actor,
+            #eps=1e-5
+        )
+
+        self.critic_optimizer = torch.optim.Adam(
+            list(self.actor_critic.encoder.parameters()) +
+            list(self.actor_critic.critic.parameters()),
+            lr=lr_critic,
+            #eps=1e-5
+        )
 
         self.gamma = gamma
         self.epsilon_clip = epsilon_clip
@@ -126,33 +166,31 @@ class PPOAgent(BaseAgent):
 
         self.episodes_collected = 0
         self.training_mode = True
-
-        self.episodes_collected = 0
-        self.training_mode = True
+        
+        self.device = device
 
     def set_training(self, training: bool):
         """Set training mode."""
         self.training_mode = training
-        self.actor.train(training)
-        self.critic.train(training)
+        self.actor_critic.train(training)
 
     def select_action(self, state, greedy=False):
         # Convert state (numpy array) to PyTorch tensor
-        state_tensor = torch.from_numpy(state).float().unsqueeze(0)
+        state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
 
         # Get log probabilities from the actor (current policy)
         with torch.set_grad_enabled(self.training_mode):
-            log_probs = self.actor(state_tensor)
-            dist = torch.distributions.Categorical(logits=log_probs)
+            logits = self.actor_critic(state_tensor)[0]
+            dist = torch.distributions.Categorical(logits=logits)
 
             if greedy:
-                action = torch.argmax(log_probs, dim=-1)
+                action = torch.argmax(logits, dim=-1)
             else:
                 action = dist.sample()
 
             # Store experience during training
             if self.training_mode:
-                value = self.critic(state_tensor)
+                value = self.actor_critic(state_tensor)[1]
                 self.episode_states.append(state_tensor)
                 self.episode_actions.append(action)
                 self.episode_log_probs.append(dist.log_prob(action))
@@ -185,7 +223,7 @@ class PPOAgent(BaseAgent):
         elif next_state is not None:
             next_state_tensor = torch.from_numpy(next_state).float().unsqueeze(0)
             with torch.no_grad():
-                next_value = self.critic(next_state_tensor)
+                next_value = self.actor_critic(next_state_tensor)[1]
         else:
             next_value = torch.tensor([[0.0]])
 
@@ -231,12 +269,12 @@ class PPOAgent(BaseAgent):
         last_advantage = 0
 
         # Convert lists to tensors
-        rewards = torch.tensor(self.batch_rewards, dtype=torch.float32)
-        values = torch.cat(self.batch_values).squeeze()
-        dones = torch.tensor(self.batch_dones, dtype=torch.float32)
+        rewards = torch.tensor(self.batch_rewards, dtype=torch.float32, device=self.device)
+        dones = torch.tensor(self.batch_dones, dtype=torch.float32, device=self.device)
 
         # Concatenate all next values (last value of each episode)
-        next_values = torch.cat(self.batch_next_values).squeeze()
+        values = torch.cat(self.batch_values).squeeze().detach().to(self.device)
+        next_values = torch.cat(self.batch_next_values).squeeze().detach().to(self.device)
         
         # Build extended values array
         ext_values = torch.zeros(len(rewards) + 1)
@@ -266,7 +304,7 @@ class PPOAgent(BaseAgent):
             )
             advantages.insert(0, last_advantage)
 
-        advantages = torch.tensor(advantages, dtype=torch.float32)
+        advantages = torch.tensor(advantages, dtype=torch.float32, device=self.device)
         returns = advantages + values
         return advantages, returns
 
@@ -311,10 +349,10 @@ class PPOAgent(BaseAgent):
                 
                 # Get new log probabilities and values for mini-batch
                 new_log_probs_dist = torch.distributions.Categorical(
-                    logits=self.actor(mb_states)
+                    logits=self.actor_critic(mb_states)[0]
                 )
                 new_log_probs = new_log_probs_dist.log_prob(mb_actions)
-                new_values = self.critic(mb_states).squeeze()
+                new_values = self.actor_critic(mb_states)[1].squeeze(-1)
                 
                 # Entropy bonus encourages exploration and prevents
                 # premature convergence to deterministic policies
@@ -324,8 +362,8 @@ class PPOAgent(BaseAgent):
                 # Value function clipping (similar to policy clipping)
                 # Prevents destructively large updates to the value function
                 # Takes the maximum of clipped and unclipped loss for conservatism
-                value_pred_clipped = mb_old_values + torch.clamp(
-                    new_values - mb_old_values,
+                value_pred_clipped = mb_old_values.detach() + torch.clamp(
+                    new_values - mb_old_values.detach(),
                     -self.value_clip,
                     self.value_clip
                 )
@@ -352,20 +390,15 @@ class PPOAgent(BaseAgent):
                 )
 
                 # --- Update Networks with Gradient Clipping ---
-                # Update critic
                 self.critic_optimizer.zero_grad()
-                critic_loss.backward()
-                # Gradient clipping prevents exploding gradients
-                nn.utils.clip_grad_norm_(
-                    self.critic.parameters(), self.max_grad_norm
-                )
-                self.critic_optimizer.step()
-
-                # Update actor
                 self.actor_optimizer.zero_grad()
+
+                critic_loss.backward(retain_graph=True)  # keep graph for shared encoder
                 actor_loss.backward()
-                # Gradient clipping prevents exploding gradients
-                nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+
+                nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+
+                self.critic_optimizer.step()
                 self.actor_optimizer.step()
 
         # Clear batch buffers
@@ -380,16 +413,18 @@ class PPOAgent(BaseAgent):
     def save(self, path):
         torch.save(
             {
-                "actor_state_dict": self.actor.state_dict(),
-                "critic_state_dict": self.critic.state_dict(),
+                # "actor_state_dict": self.actor.state_dict(),
+                # "critic_state_dict": self.critic.state_dict(),
+                "actor_critic_state_dict": self.actor_critic.state_dict()
             },
             path,
         )
 
     def load(self, path):
         checkpoint = torch.load(path)
-        self.actor.load_state_dict(checkpoint["actor_state_dict"])
-        self.critic.load_state_dict(checkpoint["critic_state_dict"])
+        # self.actor.load_state_dict(checkpoint["actor_state_dict"])
+        # self.critic.load_state_dict(checkpoint["critic_state_dict"])
+        self.actor_critic.load_state_dict(checkpoint["actor_critic_state_dict"])
 
 
 # --- 4. Training Loop ---
